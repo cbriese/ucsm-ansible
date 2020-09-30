@@ -119,13 +119,13 @@ from ansible.module_utils.remote_management.ucs import UCSModule, ucs_argument_s
 def main():
     argument_spec = ucs_argument_spec
     argument_spec.update(
-        org_dn=dict(type='str', default='org-root'),
+        org_dn=dict(type='str'),
         service_profile_name=dict(type='str', required=True),
         server_assignment=dict(type='str', choices=['server', 'pool']),
         server_dn=dict(type='str'),
         server_pool_name=dict(type='str'),
         restrict_migration=dict(type='str', default='no', choices=['yes', 'no']),
-        state=dict(default='present', choices=['present', 'absent'], type='str'),
+        state=dict(default='present', choices=['present', 'absent', 'check'], type='str'),
     )
     module = AnsibleModule(
         argument_spec,
@@ -158,10 +158,31 @@ def main():
         props_match = False
 
         # logical server distinguished name is <org>/ls-<name> and physical node dn appends 'pn' or 'pn-req'
-        ls_dn = module.params['org_dn'] + '/ls-' + module.params['service_profile_name']
-        ls_mo = ucs.login_handle.query_dn(ls_dn)
+
+        if module.params['org_dn']:
+            ls_dn = module.params['org_dn'] + '/ls-' + module.params['service_profile_name']
+            ls_mo = ucs.login_handle.query_dn(ls_dn)
+        else:
+            filter_str = '(name, "{:s}", type="eq")'.format(module.params['service_profile_name'])
+            ls_mo_list = ucs.login_handle.query_classid(class_id='lsServer', filter_str=filter_str)
+
+            if len(ls_mo_list) > 1:
+                ucs.result['msg'] = \
+                    'Service profile name {:s} is not unique; must specifiy "org_dn"'.format(
+                        module.params['service_profile_name']
+                    )
+                module.fail_json(**ucs.result)
+
+            ls_mo = ls_mo_list[0]
+                
         if ls_mo:
             ls_mo_exists = True
+            if module.params['state'] == 'check':
+                ucs.result['assoc_state'] = ls_mo.assoc_state
+                ucs.result['oper_state'] = ls_mo.oper_state
+                ucs.result['changed'] = False
+                module.exit_json(**ucs.result)
+
             pn_dn = ls_dn + '/pn'
             pn_mo = ucs.login_handle.query_dn(pn_dn)
             if pn_mo:
@@ -171,6 +192,11 @@ def main():
             pn_req_mo = ucs.login_handle.query_dn(pn_req_dn)
             if pn_req_mo:
                 pn_req_mo_exists = True
+        else:
+            ucs.result['msg'] = 'Unable to locate service profile with name {:s}'.format(
+                module.params['service_profile_name']
+            )
+            module.fail_json(**ucs.result)
 
         if module.params['state'] == 'absent':
             if ls_mo_exists and ls_mo.assign_state != 'unassigned':
